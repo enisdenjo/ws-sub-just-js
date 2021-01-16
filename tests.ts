@@ -1,6 +1,14 @@
 import http from 'http';
 import WebSocket from 'ws';
-import { connect, makeLazyConnect } from './index';
+import {
+  connect,
+  makeLazyConnect,
+  subscribe,
+  ID,
+  RequestMsg,
+  ResponseMsg,
+  CompleteMsg,
+} from './index';
 
 Object.assign(global, { WebSocket });
 
@@ -21,6 +29,28 @@ beforeAll(async () => {
   // Acknowledge everyone.
   ws.on('connection', (socket) => {
     setImmediate(() => socket.send('ack'));
+    const wavers: Record<ID, NodeJS.Timeout> = {};
+    socket.on('message', (data) => {
+      const msg = JSON.parse(data.toString()) as RequestMsg | CompleteMsg;
+      if ('complete' in msg) {
+        clearInterval(wavers[msg.complete]);
+      } else if ('id' in msg) {
+        if (msg.request === 'givemewaves') {
+          wavers[msg.id] = setInterval(
+            () =>
+              socket.send(
+                JSON.stringify({
+                  id: msg.id,
+                  response: '🌊',
+                } as ResponseMsg),
+              ),
+            1000,
+          );
+        } else {
+          // handle other type of requests
+        }
+      }
+    });
   });
 
   server.listen(0);
@@ -33,6 +63,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  // TODO-db-210116 terminate server instead of close
   server.close();
 });
 
@@ -96,5 +127,22 @@ describe('Lazy', () => {
       expect(err.code).toBe(4000);
       done();
     }
+  });
+});
+
+describe('Subscribe', () => {
+  it('should subscribe and listen for related messages', async () => {
+    const connect = await makeLazyConnect(url);
+
+    const [complete, waitForCompleteOrThrow] = await subscribe(
+      connect,
+      'givemewaves',
+      (res) => {
+        expect(res).toBe('🌊');
+        complete();
+      },
+    );
+
+    await waitForCompleteOrThrow;
   });
 });

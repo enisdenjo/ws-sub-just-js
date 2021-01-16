@@ -133,12 +133,15 @@ export function makeLazyConnect(
  * Subscription
  */
 
+/** A globally unique ID used for connecting responses. */
+export type ID = number;
+
 /**
  * The request message for starting a subscriptions. Holds
  * the unique ID for connecting future responses.
  */
 export interface RequestMsg {
-  id: number;
+  id: ID;
   request: string;
 }
 
@@ -147,7 +150,7 @@ export interface RequestMsg {
  * be the same one as requested in the request message.
  */
 export interface ResponseMsg {
-  id: number;
+  id: ID;
   response: string;
 }
 
@@ -158,16 +161,16 @@ export interface ResponseMsg {
  * can complete a subscription.
  */
 export interface CompleteMsg {
-  complete: number;
+  complete: ID;
 }
 
 /**
- * A simple subscribe function that establishes a lazy connection
- * with the configured server, silently retries on abrupt closures,
- * generates a unique subscription ID, dispatches relevant messages
- * to the listener, offers a stop method which closes the lazy
- * on last unsubscribe and a promise that resolves on completions
- * rejects on possible problems that might occur with the socket.
+ * Isolated, self sustained, unit that has all the necessary logic built
+ * right in. It establishes a lazy connection with the configured server,
+ * silently retries on abrupt closures, generates unique subscription IDs,
+ * dispatches relevant messages to the listener, offers a stop method (complete)
+ * which closes the lazy connection on last unsubscribe and a promise that resolves
+ * on completions and rejects on possible problems that might occur with the socket.
  */
 let currId = 0;
 export async function subscribe(
@@ -223,7 +226,6 @@ export async function subscribe(
          */
         completerRef.current = () => {
           socket.send(JSON.stringify({ complete: id } as CompleteMsg));
-          socket.removeEventListener('message', onMessage);
           release();
         };
 
@@ -231,7 +233,9 @@ export async function subscribe(
          * Completing the subscription releases the connection lock,
          * waiting for the release is the same as waiting for the complete.
          */
-        return await throwOnCloseOrWaitForRelease;
+        await throwOnCloseOrWaitForRelease;
+        socket.removeEventListener('message', onMessage);
+        return;
       } catch (err) {
         if ('code' in err && err.code === 1006) {
           /**
@@ -252,5 +256,5 @@ export async function subscribe(
     }
   })();
 
-  return [completerRef.current, waitForCompleteOrThrow];
+  return [() => completerRef.current(), waitForCompleteOrThrow];
 }
