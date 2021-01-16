@@ -2,11 +2,10 @@
  * Socket
  */
 
-/** For the sake of example, any message is an acknowledgment message. */
-function isAckMessage(data: unknown) {
-  return String(data) === 'ack';
-}
-
+/**
+ * A simple WebSocket connect function that resolves once the socket
+ * opens and the server acknowledges the connection.
+ */
 export async function connect(
   url: string,
 ): Promise<
@@ -25,22 +24,27 @@ export async function connect(
   await new Promise<void>((resolve, reject) => {
     /**
      * From: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_client_applications
-     * > If an error occurs while attempting to connect, first a simple event with the
-     * > name error is sent to the WebSocket object (thereby invoking its onerror handler),
-     * > and then the CloseEvent is sent to the WebSocket object (thereby invoking its
-     * > onclose handler) to indicate the reason for the connection's closing.
+     * > If an error occurs while attempting to connect, first a simple event
+     * > with the name error is sent to the WebSocket object (thereby invoking
+     * > its onerror handler), and then the CloseEvent is sent to the WebSocket
+     * > object (thereby invoking its onclose handler) to indicate the reason for
+     * > the connection's closing.
      *
-     * Keeping this in mind, listening to the `onclose` event is sufficient. Close events
-     * (code + reason) should be used to communicate any critical problem with the socket.
+     * Keeping this in mind, listening to the `onclose` event is sufficient.
+     * Close events (code + reason) should be used to communicate any critical
+     * problem with the socket.
      */
     socket.onclose = reject;
 
     /**
-     * Sometimes the socket opens and closes right after, so try relying an acknowledgment
-     * message from the server to confirm the connection instead of the `onopen` event.
+     * Sometimes the socket opens and closes right after, so try relying an
+     * acknowledgment message from the server to confirm the connection instead
+     * of the `onopen` event.
      */
     socket.onmessage = ({ data }) =>
-      isAckMessage(data) ? resolve() : reject(new Error("Didn't acknowledge!"));
+      String(data) === 'ack'
+        ? resolve()
+        : reject(new Error("Didn't acknowledge!"));
   });
 
   return [
@@ -58,6 +62,10 @@ export async function connect(
   ];
 }
 
+/**
+ * Makes a lazy connect function that establishes a connection
+ * on first connect and closes it on last disconnect.
+ */
 export function makeLazyConnect(
   url: string,
 ): () => Promise<
@@ -125,52 +133,124 @@ export function makeLazyConnect(
  * Subscription
  */
 
+/**
+ * The request message for starting a subscriptions. Holds
+ * the unique ID for connecting future responses.
+ */
 export interface RequestMsg {
   id: number;
   request: string;
 }
 
+/**
+ * The response message for an active subscription. ID would
+ * be the same one as requested in the request message.
+ */
 export interface ResponseMsg {
   id: number;
   response: string;
 }
 
+/**
+ * The complete message indicating that the subscription behind
+ * the ID is done and will not be emitting anymore events. Complete
+ * message is bi-directional so both the server and the client
+ * can complete a subscription.
+ */
 export interface CompleteMsg {
   complete: number;
 }
 
-let hellosId = 0;
+/**
+ * A simple subscribe function that establishes a lazy connection
+ * with the configured server, silently retries on abrupt closures,
+ * generates a unique subscription ID, dispatches relevant messages
+ * to the listener, offers a stop method which closes the lazy
+ * on last unsubscribe and a promise that resolves on completions
+ * rejects on possible problems that might occur with the socket.
+ */
+let currId = 0;
 export async function subscribe(
   connect: ReturnType<typeof makeLazyConnect>,
   request: string,
   listener: (response: string) => void,
-): Promise<[waitForCompleteOrThrow: Promise<void>, complete: () => void]> {
-  const [socket, release, throwOnCloseOrWaitForRelease] = await connect();
-
-  const id = hellosId++;
-  socket.send(JSON.stringify({ id, request } as RequestMsg));
-
-  socket.addEventListener('message', onMessage);
-  function onMessage({ data }: MessageEvent) {
-    const msg = JSON.parse(data) as ResponseMsg | CompleteMsg;
-    if ('complete' in msg && msg.complete === id) {
-      release();
-    } else if ('id' in msg && msg.id === id) {
-      listener(msg.response);
-    }
-  }
-
-  return [
-    /**
-     * Releasing the connection happens after completing
-     * subscription.
-     */
-    throwOnCloseOrWaitForRelease.finally(() =>
-      socket.removeEventListener('message', onMessage),
-    ),
-    () => {
-      socket.send(JSON.stringify({ complete: id } as CompleteMsg));
-      release();
+): Promise<[complete: () => void, waitForCompleteOrThrow: Promise<void>]> {
+  /**
+   * A reference to the completer which will be replaced with a new
+   * complete function once the connection is established and the
+   * subscription is requested. If the user completes the subscription
+   * early (before having connected), the `completed` flag is used
+   * to release the connection lock ASAP.
+   */
+  let completed = false;
+  const completerRef = {
+    current: () => {
+      /** For handling early completions. */
+      completed = true;
     },
-  ];
+  };
+
+  const waitForCompleteOrThrow = (async () => {
+    for (;;) {
+      try {
+        const [socket, release, throwOnCloseOrWaitForRelease] = await connect();
+
+        /**
+         * If the user completed the subscription before the connection,
+         * release it right away - we dont need it.
+         */
+        if (completed) return release();
+
+        /**
+         * Subscribe and listen...
+         */
+        const id = currId++;
+        socket.send(JSON.stringify({ id, request } as RequestMsg));
+        socket.addEventListener('message', onMessage);
+        function onMessage({ data }: MessageEvent) {
+          const msg = JSON.parse(data) as ResponseMsg | CompleteMsg;
+          if ('complete' in msg && msg.complete === id) {
+            release();
+          } else if ('id' in msg && msg.id === id) {
+            listener(msg.response);
+          }
+        }
+
+        /**
+         * Assign a new completer which notifies the server that we are
+         * done with the subscription, removes the socket message listener
+         * and releases the lazy connection lock.
+         */
+        completerRef.current = () => {
+          socket.send(JSON.stringify({ complete: id } as CompleteMsg));
+          socket.removeEventListener('message', onMessage);
+          release();
+        };
+
+        /**
+         * Completing the subscription releases the connection lock,
+         * waiting for the release is the same as waiting for the complete.
+         */
+        return await throwOnCloseOrWaitForRelease;
+      } catch (err) {
+        if ('code' in err && err.code === 1006) {
+          /**
+           * Its completely up to you when you want to retry, I've chosen
+           * to retry on the CloseEvent code 1006 as it is used when the
+           * socket connection closes abruptly (for example: due to client
+           * network issues).
+           */
+          continue;
+        } else {
+          /**
+           * All other errors are considered fatal, rethrow them to break
+           * the loop and report to the caller.
+           */
+          throw err;
+        }
+      }
+    }
+  })();
+
+  return [completerRef.current, waitForCompleteOrThrow];
 }
