@@ -1,3 +1,7 @@
+/**
+ * Socket
+ */
+
 /** For the sake of example, any message is an acknowledgment message. */
 function isAckMessage(data: unknown) {
   return String(data) === 'ack';
@@ -21,19 +25,19 @@ export async function connect(
   await new Promise<void>((resolve, reject) => {
     /**
      * From: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_client_applications
-     * > If an error occurs while attempting to connect, first a simple event with the name error is sent to the
-     * > WebSocket object (thereby invoking its onerror handler), and then the CloseEvent is sent to the WebSocket
-     * > object (thereby invoking its onclose handler) to indicate the reason for the connection's closing.
+     * > If an error occurs while attempting to connect, first a simple event with the
+     * > name error is sent to the WebSocket object (thereby invoking its onerror handler),
+     * > and then the CloseEvent is sent to the WebSocket object (thereby invoking its
+     * > onclose handler) to indicate the reason for the connection's closing.
      *
-     * Keeping this in mind, listening to the `onclose` event is sufficient. Close events (code + reason)
-     * should be used to communicate any form of error or problem with the socket.
+     * Keeping this in mind, listening to the `onclose` event is sufficient. Close events
+     * (code + reason) should be used to communicate any critical problem with the socket.
      */
     socket.onclose = reject;
 
     /**
-     * Sometimes the socket opens and closes right after, so
-     * try relying an acknowledgment message from the server
-     * to confirm the connection instead of the `onopen` event.
+     * Sometimes the socket opens and closes right after, so try relying an acknowledgment
+     * message from the server to confirm the connection instead of the `onopen` event.
      */
     socket.onmessage = ({ data }) =>
       isAckMessage(data) ? resolve() : reject(new Error("Didn't acknowledge!"));
@@ -41,7 +45,11 @@ export async function connect(
 
   return [
     socket,
-    () => socket?.close(1000, 'Normal Closure'), // normal closure is completion
+    () => socket.close(1000, 'Normal Closure'), // normal closure is completion
+    /**
+     * The promise is the state flag. If pending, socket is active; if rejected,
+     * socket closed; and if resolved, socket completed.
+     */
     new Promise<void>(
       (resolve, reject) =>
         (socket.onclose = (event) =>
@@ -72,7 +80,8 @@ export function makeLazyConnect(
       /**
        * Release the lazy connect lock. The actual decrementation
        * happens below, in the release waiter. Note that this function
-       * will be replaced with the `released` resolve function below.
+       * will be replaced with the `released` resolve function in the
+       * following promise.
        */
     };
     const released = new Promise<void>((resolve) => (release = resolve));
@@ -87,61 +96,80 @@ export function makeLazyConnect(
     return [
       socket,
       release,
-      Promise.race([released, throwOnCloseOrWaitForComplete]).then(() => {
-        /**
-         * At this point the connection lock is either released
-         * or the socket connection has been completed. In both
-         * cases, continue.
-         */
-
-        if (--locks === 0) {
+      Promise.race([
+        released.then(() => {
           /**
-           * If no lazy connection locks exist anymore, complete
-           * the actual socket conection.
+           * Release the lock by decrementing the locks.
            */
-          complete();
-        }
-      }),
+
+          if (--locks === 0) {
+            /**
+             * If no lazy connection locks exist anymore, complete
+             * the actual socket conection.
+             */
+            complete();
+          }
+        }),
+        throwOnCloseOrWaitForComplete
+          /**
+           * Complete or close, both close the socket, create
+           * a new one on next connect.
+           */
+          .finally(() => (connecting = null)),
+      ]),
     ];
   };
 }
 
+/**
+ * Subscription
+ */
+
+export interface RequestMsg {
+  id: number;
+  request: string;
+}
+
+export interface ResponseMsg {
+  id: number;
+  response: string;
+}
+
+export interface CompleteMsg {
+  complete: number;
+}
+
 let hellosId = 0;
-export async function subscribeToHellos(
+export async function subscribe(
   connect: ReturnType<typeof makeLazyConnect>,
-  listener: (msg: string) => void,
+  request: string,
+  listener: (response: string) => void,
 ): Promise<[waitForCompleteOrThrow: Promise<void>, complete: () => void]> {
   const [socket, release, throwOnCloseOrWaitForRelease] = await connect();
 
-  const id = ++hellosId;
-  socket.send(`{ "subscribe": ${id} }`);
+  const id = hellosId++;
+  socket.send(JSON.stringify({ id, request } as RequestMsg));
 
   socket.addEventListener('message', onMessage);
   function onMessage({ data }: MessageEvent) {
-    const msg = JSON.parse(data) as {
-      id: number;
-      type: 'next' | 'complete';
-      hello: string;
-    };
-    if (msg.id === id) {
-      switch (msg.type) {
-        case 'next':
-          listener(data.hello);
-          break;
-        case 'complete':
-          release();
-          break;
-      }
+    const msg = JSON.parse(data) as ResponseMsg | CompleteMsg;
+    if ('complete' in msg && msg.complete === id) {
+      release();
+    } else if ('id' in msg && msg.id === id) {
+      listener(msg.response);
     }
   }
 
   return [
+    /**
+     * Releasing the connection happens after completing
+     * subscription.
+     */
     throwOnCloseOrWaitForRelease.finally(() =>
-      // stop listening to messages regardless of the outcome
       socket.removeEventListener('message', onMessage),
     ),
     () => {
-      socket.send(`{ "complete": ${id} }`);
+      socket.send(JSON.stringify({ complete: id } as CompleteMsg));
       release();
     },
   ];

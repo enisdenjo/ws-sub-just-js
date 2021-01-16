@@ -16,18 +16,20 @@ beforeAll(async () => {
     res.writeHead(404);
     res.end();
   });
-  server.listen(0);
   ws = new WebSocket.Server({ server, path });
-  const addr = server.address();
-  if (!addr || typeof addr !== 'object') {
-    throw new Error(`Unexpected http server address ${addr}`);
-  }
-  url = `ws://localhost:${addr.port}${path}`;
 
   // Acknowledge everyone.
   ws.on('connection', (socket) => {
     setImmediate(() => socket.send('ack'));
   });
+
+  server.listen(0);
+
+  const addr = server.address();
+  if (typeof addr !== 'object') {
+    throw new Error(`Unexpected http server address ${addr}`);
+  }
+  url = `ws://localhost:${addr.port}${path}`;
 });
 
 afterAll(() => {
