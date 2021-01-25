@@ -64,7 +64,7 @@ export async function connect(
 
 /**
  * Makes a lazy connect function that establishes a connection
- * on first connect and closes it on last disconnect.
+ * on first lock and closes it on last release.
  */
 export function makeLazyConnect(
   url: string,
@@ -109,7 +109,6 @@ export function makeLazyConnect(
           /**
            * Release the lock by decrementing the locks.
            */
-
           if (--locks === 0) {
             /**
              * If no lazy connection locks exist anymore, complete
@@ -137,8 +136,8 @@ export function makeLazyConnect(
 export type ID = number;
 
 /**
- * The request message for starting a subscriptions. Holds
- * the unique ID for connecting future responses.
+ * For starting a subscriptions. Holds the unique ID
+ * for connecting future responses.
  */
 export interface RequestMsg {
   id: ID;
@@ -155,8 +154,8 @@ export interface ResponseMsg {
 }
 
 /**
- * The complete message indicating that the subscription behind
- * the ID is done and will not be emitting anymore events. Complete
+ * Complete message indicating that the subscription behind
+ * the ID is done and will not be emitting further events. Complete
  * message is bi-directional so both the server and the client
  * can complete a subscription.
  */
