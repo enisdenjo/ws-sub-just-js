@@ -1,3 +1,4 @@
-# ws-sub-no-queue
+# WebSocket subscriptions without queues
 
-🧩
+[link to article]
+
