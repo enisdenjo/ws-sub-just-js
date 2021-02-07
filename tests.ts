@@ -1,4 +1,5 @@
 import http from 'http';
+import net from 'net';
 import WebSocket from 'ws';
 import {
   connect,
@@ -16,19 +17,37 @@ function waitABit(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 10));
 }
 
-let url: string, server: http.Server, ws: WebSocket.Server;
+let url: string,
+  server: http.Server,
+  terminate: () => Promise<void>,
+  ws: WebSocket.Server;
 
 beforeAll(async () => {
   const path = '/lr';
+
   server = http.createServer((_req, res) => {
     res.writeHead(404);
     res.end();
   });
+  const sockets = new Set<net.Socket>();
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => {
+      sockets.delete(socket);
+    });
+  });
+  terminate = () =>
+    new Promise((resolve) => {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      server.close(() => resolve());
+    });
+
   ws = new WebSocket.Server({ server, path });
 
-  // Acknowledge everyone.
   ws.on('connection', (socket) => {
-    setImmediate(() => socket.send('ack'));
+    socket.send('ack'); // Acknowledge everyone.
     const wavers: Record<ID, NodeJS.Timeout> = {};
     socket.on('message', (data) => {
       const msg = JSON.parse(data.toString()) as RequestMsg | CompleteMsg;
@@ -56,15 +75,15 @@ beforeAll(async () => {
   server.listen(0);
 
   const addr = server.address();
-  if (typeof addr !== 'object') {
+  if (!addr || typeof addr !== 'object') {
     throw new Error(`Unexpected http server address ${addr}`);
   }
   url = `ws://localhost:${addr.port}${path}`;
 });
 
-afterAll(() => {
-  // TODO-db-210116 terminate server instead of close
-  server.close();
+afterAll(async () => {
+  await waitABit();
+  terminate();
 });
 
 it('should connect after acknowledgment', async () => {
@@ -121,7 +140,7 @@ describe('Lazy', () => {
     socket.close(4000);
     socket.onclose;
     try {
-      await throwOnCloseOrWaitForRelease;
+      await throwOnCloseOrWaitForRelease();
       fail("Should've thrown");
     } catch (err) {
       expect(err.code).toBe(4000);
@@ -134,7 +153,7 @@ describe('Subscribe', () => {
   it('should subscribe and listen for related messages', async () => {
     const connect = await makeLazyConnect(url);
 
-    const [complete, waitForCompleteOrThrow] = await subscribe(
+    const [complete, waitForCompleteOrThrow] = subscribe(
       connect,
       'givemewaves',
       (res) => {
@@ -144,5 +163,6 @@ describe('Subscribe', () => {
     );
 
     await waitForCompleteOrThrow;
+    // await waitABit();
   });
 });
