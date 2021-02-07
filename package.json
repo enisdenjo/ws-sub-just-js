@@ -1,7 +1,8 @@
 {
   "name": "ws-sub-no-queue",
   "scripts": {
-    "test": "jest"
+    "test": "jest",
+    "type-check": "tsc --noEmit"
   },
   "resolutions": {
     "fsevents": "2.1.3"
