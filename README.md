@@ -1,4 +1,2 @@
-# WebSocket subscriptions without queues
-
-[link to article]
+# [WebSocket subscriptions without queues](https://blog.logrocket.com/using-websocket-subscriptions-without-queues/)
 
